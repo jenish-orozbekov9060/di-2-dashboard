@@ -8,39 +8,32 @@ st.title("Пульт Качества (Ди-2)")
 file_path = "data.xlsx"
 
 try:
-    # Читаем весь лист БЕЗ заголовков, чтобы найти нужную таблицу
+    # Читаем весь лист БЕЗ заголовков
     raw_df = pd.read_excel(file_path, sheet_name="Сводная", header=None)
 
-    # 1. Ищем строку, где начинается таблица по филиалам (ищем слово "Итого" в первом столбце)
+    # ============================================================
+    # БЛОК 1: ИНЦИДЕНТЫ ПО ФИЛИАЛАМ (Работает)
+    # ============================================================
     start_row = None
     for i, row in raw_df.iterrows():
         if str(row[0]).strip() == "Итого":
             start_row = i
             break
             
-    if start_row is None:
-        st.error("Не удалось найти строку 'Итого' в файле. Проверьте файл.")
-    else:
-        # Берем шапку таблицы (на 1 строку выше "Итого") и две строки данных
+    if start_row is not None:
         header_row = start_row - 1
         df_branches = raw_df.iloc[start_row : start_row + 3].copy()
         df_branches.columns = raw_df.iloc[header_row].values
         
-        # Оставляем только нужные колонки
         cols_to_keep = ['Филиал', 'Все отмены', 'Партн. отмены', 'Неверные', 'Бэдфуд']
-        # На всякий случай проверяем, что они есть
         available_cols = [c for c in cols_to_keep if c in df_branches.columns]
         df_branches = df_branches[available_cols]
-        
-        # Убираем строку "Итого", нам нужны только филиалы
         df_branches = df_branches[df_branches['Филиал'] != 'Итого'].dropna(subset=['Филиал'])
 
-        # Переводим данные в числа
         for col in ['Партн. отмены', 'Неверные', 'Бэдфуд', 'Все отмены']:
             if col in df_branches.columns:
                 df_branches[col] = pd.to_numeric(df_branches[col], errors='coerce').fillna(0)
 
-        # --- ОТРИСОВКА ---
         st.subheader("1. Инциденты по филиалам")
         
         col1, col2 = st.columns(2)
@@ -54,35 +47,50 @@ try:
 
         st.divider()
 
-        # 2. Ищем таблицу причин по часам
+        # ============================================================
+        # БЛОК 2: ПРИЧИНЫ ПО ЧАСАМ (Исправленный)
+        # ============================================================
         st.subheader("2. В какое время и почему происходят инциденты?")
         
-        # Ищем строку, где написано "Причины по часам"
-        hour_start_row = None
-        for i, row in raw_df.iterrows():
-            if "Причины по часам" in str(row[0]):
-                hour_start_row = i + 3 # Шапка начинается через 3 строки после заголовка
-                break
-        
-        if hour_start_row:
-            df_hours = raw_df.iloc[hour_start_row:].copy()
-            df_hours.columns = raw_df.iloc[hour_start_row].values
-            df_hours = df_hours.dropna(subset=['Час', 'Причина'])
+        # В вашем Excel-файле детальная таблица по часам начинается на 29-й строке (индекс 28)
+        # Мы жестко задаем эти координаты, чтобы не зависеть от объединенных ячеек
+        try:
+            # Берем данные начиная с 30-й строки (индекс 29), чтобы пропустить заголовок и шапку
+            df_hours = raw_df.iloc[29:].copy()
+            
+            # Задаем названия колонок вручную, как они должны быть
+            # (основываясь на структуре вашего файла)
+            df_hours.columns = ['Бренд', 'Филиал', 'ID филиала', 'Час', 'Метрика', 'Причина', 'Случаев', 'Дат', 'Заказы с ID', 'Случаи / заказы', 'Доля причины', 'Пусто1', 'Пусто2', 'Пусто3']
+            
+            # Очищаем от пустых строк и оставляем только нужные колонки
+            df_hours = df_hours.dropna(subset=['Час', 'Причина', 'Случаев'])
             df_hours = df_hours[['Филиал', 'Час', 'Метрика', 'Причина', 'Случаев']]
+            
+            # Превращаем "Случаев" в числа
+            df_hours['Случаев'] = pd.to_numeric(df_hours['Случаев'], errors='coerce').fillna(0)
 
-            selected_branch = st.selectbox("Выберите точку для детального анализа:", df_hours['Филиал'].unique())
-            
-            filtered_hours = df_hours[df_hours['Филиал'] == selected_branch]
-            
-            if not filtered_hours.empty:
-                fig_reasons = px.bar(filtered_hours, x='Час', y='Случаев', color='Причина', 
-                                     title=f"Причины по часам: {selected_branch}",
-                                     labels={'Случаев': 'Количество'})
-                st.plotly_chart(fig_reasons, use_container_width=True)
+            if not df_hours.empty:
+                # Выбор филиала
+                branches_in_hours = df_hours['Филиал'].dropna().unique()
+                selected_branch = st.selectbox("Выберите точку для детального анализа:", branches_in_hours)
+                
+                filtered_hours = df_hours[df_hours['Филиал'] == selected_branch]
+                
+                if not filtered_hours.empty:
+                    fig_reasons = px.bar(filtered_hours, x='Час', y='Случаев', color='Причина', 
+                                         title=f"Причины по часам: {selected_branch}",
+                                         labels={'Случаев': 'Количество инцидентов'})
+                    st.plotly_chart(fig_reasons, use_container_width=True)
+                    
+                    st.info("**Как читать график:** Каждый цветной блок — это конкретная причина. Высота столбца показывает, сколько раз эта причина встречалась в это время. Например, если видите высокий столбец 'Отсутствует позиция' в 18:00, значит, вечером закончилась еда.")
+                else:
+                    st.warning("Нет данных по выбранной точке.")
             else:
-                st.warning("Нет данных по часам для этой точки.")
-        else:
-            st.warning("Не удалось найти таблицу 'Причины по часам'.")
+                st.warning("Таблица по часам пуста или не распознана.")
+                
+        except Exception as e:
+            st.error(f"Ошибка при обработке таблицы по часам: {e}")
+            st.info("Возможно, структура файла немного отличается. Попробуйте обновить страницу.")
 
 except Exception as e:
-    st.error(f"Ошибка при чтении файла: {e}")
+    st.error(f"Общая ошибка при чтении файла: {e}")
