@@ -4,11 +4,11 @@ import plotly.express as px
 
 st.set_page_config(page_title="Пульт Качества (Ди-2)", layout="wide")
 st.title("Пульт Качества (Ди-2)")
+st.caption("Период анализа: 19 октября — 15 ноября 2026 года")
 
 file_path = "data.xlsx"
 
 try:
-    # Читаем весь лист БЕЗ заголовков
     raw_df = pd.read_excel(file_path, sheet_name="Сводная", header=None)
 
     # ============================================================
@@ -34,44 +34,56 @@ try:
             if col in df_branches.columns:
                 df_branches[col] = pd.to_numeric(df_branches[col], errors='coerce').fillna(0)
 
-        st.subheader("1. Инциденты по филиалам")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.dataframe(df_branches, hide_index=True)
-        with col2:
-            fig_branch = px.bar(df_branches, x='Филиал', y=['Партн. отмены', 'Неверные', 'Бэдфуд'], 
-                                title="Партнерские инциденты", barmode='group',
-                                color_discrete_sequence=['#D64545', '#E6A700', '#2E9E4F'])
-            st.plotly_chart(fig_branch, use_container_width=True)
-
-        st.divider()
-
         # ============================================================
         # БЛОК 2: ПРИЧИНЫ ПО ЧАСАМ
         # ============================================================
-        st.subheader("2. В какое время и почему происходят инциденты?")
-        
         try:
-            # Берем данные начиная с 30-й строки (индекс 29)
             df_hours = raw_df.iloc[29:].copy()
-            
-            # Даем имена только первым 14 колонкам
             new_columns = ['Бренд', 'Филиал', 'ID филиала', 'Час', 'Метрика', 'Причина', 'Случаев', 'Дат', 'Заказы с ID', 'Случаи / заказы', 'Доля причины', 'Пусто1', 'Пусто2', 'Пусто3']
-            
-            # Обрезаем датафрейм до 14 колонок и присваиваем имена
             df_hours = df_hours.iloc[:, :14]
             df_hours.columns = new_columns
             
-            # Очищаем от пустых строк и оставляем только нужные колонки
             df_hours = df_hours.dropna(subset=['Час', 'Причина', 'Случаев'])
             df_hours = df_hours[['Филиал', 'Час', 'Метрика', 'Причина', 'Случаев']]
-            
-            # Превращаем "Случаев" в числа
             df_hours['Случаев'] = pd.to_numeric(df_hours['Случаев'], errors='coerce').fillna(0)
 
+            # --- АВТОМАТИЧЕСКИЙ ВЫВОД (Умная плашка) ---
+            if not df_hours.empty and not df_branches.empty:
+                # Находим самую проблемную точку
+                worst_branch = df_branches.loc[df_branches['Партн. отмены'].idxmax(), 'Филиал']
+                
+                # Фильтруем данные по этой точке
+                worst_branch_data = df_hours[df_hours['Филиал'] == worst_branch]
+                
+                if not worst_branch_data.empty:
+                    # Самый частый час
+                    top_hour = worst_branch_data.groupby('Час')['Случаев'].sum().idxmax()
+                    # Самая частая причина
+                    top_reason = worst_branch_data.groupby('Причина')['Случаев'].sum().idxmax()
+                    
+                    st.error(f"🚨 **Главная точка боли:** {worst_branch} \n\n"
+                             f"📍 **Пиковый час:** {top_hour} \n\n"
+                             f"⚠️ **Самая частая причина:** {top_reason} \n\n"
+                             f"*Рекомендуется обратить внимание на работу кухни в это время.*")
+
+            st.divider()
+
+            # --- ОТРИСОВКА БЛОКА 1 ---
+            st.subheader("1. Инциденты по филиалам")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.dataframe(df_branches, hide_index=True)
+            with col2:
+                fig_branch = px.bar(df_branches, x='Филиал', y=['Партн. отмены', 'Неверные', 'Бэдфуд'], 
+                                    title="Партнерские инциденты", barmode='group',
+                                    color_discrete_sequence=['#D64545', '#E6A700', '#2E9E4F'])
+                st.plotly_chart(fig_branch, use_container_width=True)
+
+            st.divider()
+
+            # --- ОТРИСОВКА БЛОКА 2 ---
+            st.subheader("2. В какое время и почему происходят инциденты?")
             if not df_hours.empty:
-                # Выбор филиала
                 branches_in_hours = df_hours['Филиал'].dropna().unique()
                 selected_branch = st.selectbox("Выберите точку для детального анализа:", branches_in_hours)
                 
