@@ -35,7 +35,7 @@ try:
                 df_branches[col] = pd.to_numeric(df_branches[col], errors='coerce').fillna(0)
 
         # ============================================================
-        # БЛОК 2: ПРИЧИНЫ ПО ЧАСАМ
+        # ПАРСИНГ БЛОКА 2: ПРИЧИНЫ ПО ЧАСАМ
         # ============================================================
         try:
             df_hours = raw_df.iloc[29:].copy()
@@ -47,24 +47,37 @@ try:
             df_hours = df_hours[['Филиал', 'Час', 'Метрика', 'Причина', 'Случаев']]
             df_hours['Случаев'] = pd.to_numeric(df_hours['Случаев'], errors='coerce').fillna(0)
 
-            # --- АВТОМАТИЧЕСКИЙ ВЫВОД (Умная плашка) ---
+            # --- АВТОМАТИЧЕСКИЙ ВЫВОД (ИСПРАВЛЕННЫЙ) ---
             if not df_hours.empty and not df_branches.empty:
                 # Находим самую проблемную точку
                 worst_branch = df_branches.loc[df_branches['Партн. отмены'].idxmax(), 'Филиал']
-                
-                # Фильтруем данные по этой точке
-                worst_branch_data = df_hours[df_hours['Филиал'] == worst_branch]
+                worst_branch_data = df_hours[df_hours['Филиал'] == worst_branch].copy()
                 
                 if not worst_branch_data.empty:
-                    # Самый частый час
-                    top_hour = worst_branch_data.groupby('Час')['Случаев'].sum().idxmax()
-                    # Самая частая причина
-                    top_reason = worst_branch_data.groupby('Причина')['Случаев'].sum().idxmax()
-                    
-                    st.error(f"🚨 **Главная точка боли:** {worst_branch} \n\n"
-                             f"📍 **Пиковый час:** {top_hour} \n\n"
-                             f"⚠️ **Самая частая причина:** {top_reason} \n\n"
-                             f"*Рекомендуется обратить внимание на работу кухни в это время.*")
+                    # 1. Отфильтровываем мусорные строки (где написано "Все" или нет двоеточия в часах)
+                    clean_data = worst_branch_data[
+                        (~worst_branch_data['Час'].astype(str).str.contains('Все', case=False, na=False)) &
+                        (~worst_branch_data['Причина'].astype(str).str.contains('Все', case=False, na=False)) &
+                        (worst_branch_data['Час'].astype(str).str.contains(':', na=False))
+                    ].copy()
+
+                    if not clean_data.empty:
+                        # Самый частый час
+                        top_hour_series = clean_data.groupby('Час')['Случаев'].sum()
+                        top_hour = top_hour_series.idxmax()
+                        top_hour_cases = int(top_hour_series.max())
+                        
+                        # Самая частая причина
+                        top_reason_series = clean_data.groupby('Причина')['Случаев'].sum()
+                        top_reason = top_reason_series.idxmax()
+                        top_reason_cases = int(top_reason_series.max())
+                        
+                        st.error(f"🚨 **Главная точка боли:** {worst_branch} \n\n"
+                                 f"📍 **Пиковый час:** {top_hour} (инцидентов: {top_hour_cases}) \n\n"
+                                 f"⚠️ **Самая частая причина:** {top_reason} (случаев: {top_reason_cases}) \n\n"
+                                 f"*Рекомендуется обратить внимание на работу кухни в это время.*")
+                    else:
+                        st.warning("Не удалось выделить конкретный час (в данных только общие цифры).")
 
             st.divider()
 
@@ -89,6 +102,12 @@ try:
                 
                 filtered_hours = df_hours[df_hours['Филиал'] == selected_branch]
                 
+                # Фильтруем для графика, чтобы не было "Все"
+                filtered_hours = filtered_hours[
+                    (~filtered_hours['Час'].astype(str).str.contains('Все', case=False, na=False)) &
+                    (filtered_hours['Час'].astype(str).str.contains(':', na=False))
+                ]
+
                 if not filtered_hours.empty:
                     fig_reasons = px.bar(filtered_hours, x='Час', y='Случаев', color='Причина', 
                                          title=f"Причины по часам: {selected_branch}",
@@ -97,9 +116,9 @@ try:
                     
                     st.info("**Как читать график:** Каждый цветной блок — это конкретная причина. Высота столбца показывает, сколько раз эта причина встречалась в это время.")
                 else:
-                    st.warning("Нет данных по выбранной точке.")
+                    st.warning("Нет детальных данных по часам для этой точки.")
             else:
-                st.warning("Таблица по часам пуста или не распознана.")
+                st.warning("Таблица по часам пуста.")
                 
         except Exception as e:
             st.error(f"Ошибка при обработке таблицы по часам: {e}")
