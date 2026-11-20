@@ -44,17 +44,16 @@ try:
             df_hours.columns = new_columns
             
             df_hours = df_hours.dropna(subset=['Час', 'Причина', 'Случаев'])
-            df_hours = df_hours[['Филиал', 'Час', 'Метрика', 'Причина', 'Случаев']]
+            # Оставляем нужные колонки, включая "Дат" (сколько дней повторялось)
+            df_hours = df_hours[['Филиал', 'Час', 'Метрика', 'Причина', 'Случаев', 'Дат']]
             df_hours['Случаев'] = pd.to_numeric(df_hours['Случаев'], errors='coerce').fillna(0)
 
-            # --- АВТОМАТИЧЕСКИЙ ВЫВОД (ИСПРАВЛЕННЫЙ) ---
+            # --- АВТОМАТИЧЕСКИЙ ВЫВОД ---
             if not df_hours.empty and not df_branches.empty:
-                # Находим самую проблемную точку
                 worst_branch = df_branches.loc[df_branches['Партн. отмены'].idxmax(), 'Филиал']
                 worst_branch_data = df_hours[df_hours['Филиал'] == worst_branch].copy()
                 
                 if not worst_branch_data.empty:
-                    # 1. Отфильтровываем мусорные строки (где написано "Все" или нет двоеточия в часах)
                     clean_data = worst_branch_data[
                         (~worst_branch_data['Час'].astype(str).str.contains('Все', case=False, na=False)) &
                         (~worst_branch_data['Причина'].astype(str).str.contains('Все', case=False, na=False)) &
@@ -62,12 +61,10 @@ try:
                     ].copy()
 
                     if not clean_data.empty:
-                        # Самый частый час
                         top_hour_series = clean_data.groupby('Час')['Случаев'].sum()
                         top_hour = top_hour_series.idxmax()
                         top_hour_cases = int(top_hour_series.max())
                         
-                        # Самая частая причина
                         top_reason_series = clean_data.groupby('Причина')['Случаев'].sum()
                         top_reason = top_reason_series.idxmax()
                         top_reason_cases = int(top_reason_series.max())
@@ -76,8 +73,6 @@ try:
                                  f"📍 **Пиковый час:** {top_hour} (инцидентов: {top_hour_cases}) \n\n"
                                  f"⚠️ **Самая частая причина:** {top_reason} (случаев: {top_reason_cases}) \n\n"
                                  f"*Рекомендуется обратить внимание на работу кухни в это время.*")
-                    else:
-                        st.warning("Не удалось выделить конкретный час (в данных только общие цифры).")
 
             st.divider()
 
@@ -100,21 +95,45 @@ try:
                 branches_in_hours = df_hours['Филиал'].dropna().unique()
                 selected_branch = st.selectbox("Выберите точку для детального анализа:", branches_in_hours)
                 
+                # Фильтруем данные для графика (убираем "Все")
                 filtered_hours = df_hours[df_hours['Филиал'] == selected_branch]
-                
-                # Фильтруем для графика, чтобы не было "Все"
-                filtered_hours = filtered_hours[
+                filtered_hours_clean = filtered_hours[
                     (~filtered_hours['Час'].astype(str).str.contains('Все', case=False, na=False)) &
                     (filtered_hours['Час'].astype(str).str.contains(':', na=False))
                 ]
 
-                if not filtered_hours.empty:
-                    fig_reasons = px.bar(filtered_hours, x='Час', y='Случаев', color='Причина', 
+                if not filtered_hours_clean.empty:
+                    fig_reasons = px.bar(filtered_hours_clean, x='Час', y='Случаев', color='Причина', 
                                          title=f"Причины по часам: {selected_branch}",
                                          labels={'Случаев': 'Количество инцидентов'})
                     st.plotly_chart(fig_reasons, use_container_width=True)
                     
                     st.info("**Как читать график:** Каждый цветной блок — это конкретная причина. Высота столбца показывает, сколько раз эта причина встречалась в это время.")
+                    
+                    # ============================================================
+                    # БЛОК 3: ДЕТАЛЬНАЯ ТАБЛИЦА (То, что вы просили)
+                    # ============================================================
+                    st.markdown("---")
+                    st.subheader("📋 Детальный список случаев")
+                    st.write("Вы можете нажать на заголовок столбца (например, 'Кол-во случаев'), чтобы отсортировать данные и найти самое проблемное время.")
+                    
+                    # Готовим таблицу для показа
+                    display_df = filtered_hours_clean.copy()
+                    display_df = display_df.rename(columns={
+                        'Час': 'Время',
+                        'Метрика': 'Тип инцидента',
+                        'Причина': 'Причина',
+                        'Случаев': 'Кол-во случаев',
+                        'Дат': 'В скольких днях'
+                    })
+                    
+                    # Выбираем порядок колонок
+                    cols_to_show = ['Время', 'Тип инцидента', 'Причина', 'Кол-во случаев', 'В скольких днях']
+                    cols_to_show = [c for c in cols_to_show if c in display_df.columns]
+                    
+                    # Выводим таблицу в Streamlit (с возможностью сортировки)
+                    st.dataframe(display_df[cols_to_show], hide_index=True, use_container_width=True)
+
                 else:
                     st.warning("Нет детальных данных по часам для этой точки.")
             else:
