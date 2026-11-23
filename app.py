@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import re
 
 # ============================================================
 # НАСТРОЙКИ ПАРТНЕРА
@@ -37,21 +36,22 @@ def safe_divide(a, b):
     if not isinstance(a, pd.Series): a = pd.Series([a]*len(b), index=b.index)
     return (a / b.replace(0, float('nan'))).fillna(0) * 100
 
-# Умная сортировка для строковых дат (например, "1.11" и "19.10")
-def smart_date_sort(df, date_col, time_col):
-    try:
-        # Пытаемся преобразовать в datetime, понимая точки
-        temp_dates = df[date_col].astype(str).str.replace('.', '-', regex=False)
-        # Если есть год (3 части), или без года (2 части)
-        parsed = pd.to_datetime(temp_dates, dayfirst=True, errors='coerce')
-        if parsed.isna().all():
-            return df.sort_values(by=[date_col, time_col])
+def clean_columns(cols):
+    """Убирает дубликаты и пустые названия колонок (лечит DuplicateError)"""
+    clean_cols = []
+    seen = {}
+    for i, col in enumerate(cols):
+        c_str = str(col).strip()
+        if c_str == 'nan' or c_str == '' or pd.isna(col):
+            c_str = f"Unnamed_{i}"
         
-        df = df.copy()
-        df['temp_sort_date'] = parsed
-        return df.sort_values(by=['temp_sort_date', time_col])
-    except:
-        return df.sort_values(by=[date_col, time_col])
+        if c_str in seen:
+            seen[c_str] += 1
+            clean_cols.append(f"{c_str}_{seen[c_str]}")
+        else:
+            seen[c_str] = 0
+            clean_cols.append(c_str)
+    return clean_cols
 
 file_path = "data.xlsx"
 
@@ -70,11 +70,18 @@ try:
             
     if header_row is not None:
         df_branches = raw_df.iloc[header_row + 1 :].copy()
-        df_branches.columns = raw_df.iloc[header_row].values
+        df_branches.columns = clean_columns(raw_df.iloc[header_row].values)
         
-        df_points = df_branches[~df_branches['Филиал'].astype(str).str.contains('Итого', case=False, na=False)].copy()
-        df_points = df_points[df_points['Филиал'].astype(str).str.strip() != '']
+        # ЖЕСТКАЯ ФИЛЬТРАЦИЯ: убираем "Итого", пустые строки и строки "nan"
+        df_points = df_branches.copy()
+        df_points['Филиал'] = df_points['Филиал'].astype(str).str.strip()
+        df_points = df_points[
+            (df_points['Филиал'].str.lower() != 'nan') & 
+            (df_points['Филиал'].str.lower() != '') & 
+            (~df_points['Филиал'].str.contains('Итого', case=False, na=False))
+        ]
 
+        # Конвертация в числа
         cols_to_num = ['Заказы с ID', 'Партн. отмены', 'Неверные', 'Бэдфуд']
         for col in cols_to_num:
             if col in df_points.columns:
@@ -82,6 +89,7 @@ try:
             else:
                 df_points[col] = 0 
 
+        # Считаем проценты
         df_points['% Отмен'] = safe_divide(df_points['Партн. отмены'], df_points['Заказы с ID'])
         df_points['% Неверных'] = safe_divide(df_points['Неверные'], df_points['Заказы с ID'])
         df_points['% БФ'] = safe_divide(df_points['Бэдфуд'], df_points['Заказы с ID'])
@@ -90,6 +98,7 @@ try:
         st.subheader("📍 Детализация по точкам")
         
         if not df_points.empty:
+            # Рендер карточек
             for i in range(0, len(df_points), 3):
                 cols = st.columns(3)
                 chunk = df_points.iloc[i:i+3]
@@ -104,23 +113,43 @@ try:
                         st.write("---")
 
             st.divider()
+            
             # ============================================================
-            # 2. ГРАФИК (Теперь защищен от пустых данных)
+            # 2. ГРАФИК (В стиле "Шаурмы")
             # ============================================================
             st.subheader("📊 Визуальное сравнение")
+            
+            # Используем темную тему Plotly и задаем цвета
             fig = go.Figure()
-            fig.add_bar(name="Отмены, %", x=df_points['Филиал'], y=df_points['% Отмен'], marker_color='#D64545', text=df_points['% Отмен'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
-            fig.add_bar(name="Вронги, %", x=df_points['Филиал'], y=df_points['% Неверных'], marker_color='#E6A700', text=df_points['% Неверных'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
-            fig.add_bar(name="БФ, %", x=df_points['Филиал'], y=df_points['% БФ'], marker_color='#2E9E4F', text=df_points['% БФ'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
+            fig.add_trace(go.Bar(
+                name="Отмены, %", x=df_points['Филиал'], y=df_points['% Отмен'], 
+                marker_color='#ef4444', text=df_points['% Отмен'].apply(lambda x: f"{x:.2f}%"), textposition="outside"
+            ))
+            fig.add_trace(go.Bar(
+                name="Вронги, %", x=df_points['Филиал'], y=df_points['% Неверных'], 
+                marker_color='#f59e0b', text=df_points['% Неверных'].apply(lambda x: f"{x:.2f}%"), textposition="outside"
+            ))
+            fig.add_trace(go.Bar(
+                name="БФ, %", x=df_points['Филиал'], y=df_points['% БФ'], 
+                marker_color='#10b981', text=df_points['% БФ'].apply(lambda x: f"{x:.2f}%"), textposition="outside"
+            ))
             
-            fig.add_hline(y=TARGETS['cancels'], line_dash="dash", line_color="#D64545", annotation_text=f"Цель отмен {TARGETS['cancels']}%", annotation_position="top left")
-            fig.add_hline(y=TARGETS['wrongs'], line_dash="dash", line_color="#E6A700", annotation_text=f"Цель вронгов {TARGETS['wrongs']}%", annotation_position="top left")
-            fig.add_hline(y=TARGETS['bf'], line_dash="dash", line_color="#2E9E4F", annotation_text=f"Цель БФ {TARGETS['bf']}%", annotation_position="bottom left")
+            # Добавляем линии целей
+            fig.add_hline(y=TARGETS['cancels'], line_dash="dash", line_color="#ef4444", annotation_text=f"Цель отмен {TARGETS['cancels']}%", annotation_position="top left")
+            fig.add_hline(y=TARGETS['wrongs'], line_dash="dash", line_color="#f59e0b", annotation_text=f"Цель вронгов {TARGETS['wrongs']}%", annotation_position="top left")
+            fig.add_hline(y=TARGETS['bf'], line_dash="dash", line_color="#10b981", annotation_text=f"Цель БФ {TARGETS['bf']}%", annotation_position="bottom left")
             
-            fig.update_layout(barmode='group', yaxis_title="%", margin=dict(t=40, b=40, l=40, r=40))
+            fig.update_layout(
+                barmode='group', 
+                yaxis_title="%", 
+                template="plotly_dark", # Темная тема как на скрине
+                margin=dict(t=50, b=40, l=40, r=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
             st.plotly_chart(fig, use_container_width=True)
+            
         else:
-            st.info("Нет данных по отдельным филиалам для отображения графиков.")
+            st.info("Нет валидных данных по филиалам.")
 
         st.divider()
 
@@ -135,7 +164,8 @@ try:
 
         if hour_header_idx is not None:
             df_hours = raw_df.iloc[hour_header_idx + 1:].copy()
-            df_hours.columns = raw_df.iloc[hour_header_idx].values
+            # Применяем функцию очистки колонок (лечит DuplicateError)
+            df_hours.columns = clean_columns(raw_df.iloc[hour_header_idx].values)
             
             df_hours = df_hours.dropna(subset=['Час', 'Причина'])
             
@@ -149,15 +179,16 @@ try:
             else:
                 df_hours['Дат'] = "Без даты"
 
-            # Убрали жесткую проверку на ':' (чтобы не отсеять часы без двоеточия)
             df_hours_clean = df_hours[
                 (~df_hours['Час'].astype(str).str.contains('Все', case=False, na=False)) &
                 (~df_hours['Причина'].astype(str).str.contains('Все', case=False, na=False))
             ]
 
             st.subheader("⏰ Когда и почему?")
-            if not df_hours_clean.empty:
-                branches_in_hours = df_hours_clean['Филиал'].dropna().unique() if 'Филиал' in df_hours_clean.columns else []
+            if not df_hours_clean.empty and 'Филиал' in df_hours_clean.columns:
+                branches_in_hours = df_hours_clean['Филиал'].dropna().unique()
+                # Фильтруем nan из списка филиалов
+                branches_in_hours = [b for b in branches_in_hours if str(b).lower() != 'nan']
                 
                 if len(branches_in_hours) > 0:
                     selected_branch = st.selectbox("Выберите точку для анализа:", branches_in_hours)
@@ -166,13 +197,11 @@ try:
                     if not filtered_hours.empty:
                         filtered_hours['День_Час'] = filtered_hours['Дат'] + " | " + filtered_hours['Час'].astype(str)
 
-                        # Применяем умную сортировку
-                        filtered_hours = smart_date_sort(filtered_hours, 'Дат', 'Час')
-
                         fig_reasons = px.bar(
                             filtered_hours, x='День_Час', y='Случаев', color='Причина', 
                             title=f"Причины по дням и часам: {selected_branch}",
-                            labels={'День_Час': 'Дата | Время', 'Случаев': 'Кол-во'}
+                            labels={'День_Час': 'Дата | Время', 'Случаев': 'Кол-во'},
+                            template="plotly_dark" # Тоже делаем темным для единообразия
                         )
                         fig_reasons.update_layout(xaxis_tickangle=-45)
                         st.plotly_chart(fig_reasons, use_container_width=True)
@@ -181,12 +210,11 @@ try:
                         st.subheader("📋 Детальный список")
                         display_cols = [c for c in ['Дат', 'Час', 'Метрика', 'Причина', 'Случаев'] if c in filtered_hours.columns]
                         display_df_h = filtered_hours[display_cols].copy()
-                        
                         rename_map = {'Дат': 'Дата', 'Час': 'Время', 'Метрика': 'Тип', 'Причина': 'Причина', 'Случаев': 'Кол-во'}
                         display_df_h = display_df_h.rename(columns=rename_map)
                         st.dataframe(display_df_h, hide_index=True, use_container_width=True)
                 else:
-                    st.warning("В данных по причинам не найдена колонка 'Филиал'.")
+                    st.warning("В данных по причинам не найдено валидных филиалов.")
             else:
                 st.info("Нет детальных данных по причинам.")
         else:
@@ -196,6 +224,5 @@ try:
         st.error("Не удалось найти шапку таблицы с филиалами (ожидались колонки 'Филиал' и 'Заказы с ID').")
 
 except Exception as e:
-    # Теперь ошибка будет более информативной
     st.error(f"Произошла ошибка: {type(e).__name__}.")
-    st.exception(e) # Выводит полный стек ошибки (помогает при отладке)
+    st.exception(e)
