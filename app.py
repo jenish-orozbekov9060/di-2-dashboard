@@ -2,25 +2,20 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import re
 
 # ============================================================
-# НАСТРОЙКИ ПАРТНЕРА (Меняйте это поле для каждого дашборда!)
+# НАСТРОЙКИ ПАРТНЕРА
 # ============================================================
-PARTNER_NAME = "Ди-2" # <-- ВПИШИТЕ СЮДА: "Дом плова" или "Ди-2" или "Шаурма на углях"
+PARTNER_NAME = "Ди-2" 
 # ============================================================
 
 st.set_page_config(page_title=f"Пульт Качества ({PARTNER_NAME})", layout="wide")
 st.title(f"Пульт Качества: {PARTNER_NAME}")
 st.caption("Период анализа: 19 октября — 15 ноября 2026 года")
 
-# ТАРГЕТЫ (ЦЕЛИ)
-TARGETS = {
-    "cancels": 0.80,
-    "wrongs": 0.60,
-    "bf": 0.30
-}
+TARGETS = {"cancels": 0.80, "wrongs": 0.60, "bf": 0.30}
 
-# Функция для отрисовки красивой карточки
 def render_metric_card(col, label, value, target):
     color = "#2E9E4F" if value <= target else "#D64545"
     diff = value - target
@@ -38,101 +33,99 @@ def render_metric_card(col, label, value, target):
         unsafe_allow_html=True
     )
 
+def safe_divide(a, b):
+    if not isinstance(a, pd.Series): a = pd.Series([a]*len(b), index=b.index)
+    return (a / b.replace(0, float('nan'))).fillna(0) * 100
+
+# Умная сортировка для строковых дат (например, "1.11" и "19.10")
+def smart_date_sort(df, date_col, time_col):
+    try:
+        # Пытаемся преобразовать в datetime, понимая точки
+        temp_dates = df[date_col].astype(str).str.replace('.', '-', regex=False)
+        # Если есть год (3 части), или без года (2 части)
+        parsed = pd.to_datetime(temp_dates, dayfirst=True, errors='coerce')
+        if parsed.isna().all():
+            return df.sort_values(by=[date_col, time_col])
+        
+        df = df.copy()
+        df['temp_sort_date'] = parsed
+        return df.sort_values(by=['temp_sort_date', time_col])
+    except:
+        return df.sort_values(by=[date_col, time_col])
+
 file_path = "data.xlsx"
 
 try:
-    # ЧИТАЕМ ПЕРВЫЙ ЛИСТ (sheet_name=0), независимо от его названия
     raw_df = pd.read_excel(file_path, sheet_name=0, header=None)
 
     # ============================================================
     # 1. ПОИСК ТАБЛИЦЫ ФИЛИАЛОВ
     # ============================================================
-    start_row = None
+    header_row = None
     for i, row in raw_df.iterrows():
-        if str(row[0]).strip() == "Итого":
-            start_row = i
+        row_values = [str(val).strip() for val in row.values]
+        if 'Филиал' in row_values and ('Заказы с ID' in row_values or 'Все отмены' in row_values):
+            header_row = i
             break
             
-    if start_row is not None:
-        header_row = start_row - 1
-        df_branches = raw_df.iloc[start_row : start_row + 10].copy() 
+    if header_row is not None:
+        df_branches = raw_df.iloc[header_row + 1 :].copy()
         df_branches.columns = raw_df.iloc[header_row].values
         
-        cols_to_keep = ['Филиал', 'Заказы с ID', 'Все отмены', 'Партн. отмены', 'Неверные', 'Бэдфуд']
-        available_cols = [c for c in cols_to_keep if c in df_branches.columns]
-        df_branches = df_branches[available_cols].dropna(subset=['Филиал'])
-        df_branches = df_branches[df_branches['Филиал'] != ''] 
+        df_points = df_branches[~df_branches['Филиал'].astype(str).str.contains('Итого', case=False, na=False)].copy()
+        df_points = df_points[df_points['Филиал'].astype(str).str.strip() != '']
 
-        for col in cols_to_keep[1:]:
-            if col in df_branches.columns:
-                df_branches[col] = pd.to_numeric(df_branches[col], errors='coerce').fillna(0)
+        cols_to_num = ['Заказы с ID', 'Партн. отмены', 'Неверные', 'Бэдфуд']
+        for col in cols_to_num:
+            if col in df_points.columns:
+                df_points[col] = pd.to_numeric(df_points[col], errors='coerce').fillna(0)
+            else:
+                df_points[col] = 0 
 
-        df_branches['Заказы с ID'] = df_branches['Заказы с ID'].replace(0, 1) 
-        
-        df_branches['% Отмен'] = (df_branches['Партн. отмены'] / df_branches['Заказы с ID']) * 100
-        df_branches['% Неверных'] = (df_branches['Неверные'] / df_branches['Заказы с ID']) * 100
-        df_branches['% БФ'] = (df_branches['Бэдфуд'] / df_branches['Заказы с ID']) * 100
-
-        # ============================================================
-        # 2. ОБЩИЙ ТАРГЕТ ПО БРЕНДУ
-        # ============================================================
-        st.subheader(f"🏢 Общая картина: {PARTNER_NAME}")
-        total_row = df_branches[df_branches['Филиал'].str.contains('Итого', case=False, na=False)]
-        
-        if not total_row.empty:
-            c1, c2, c3 = st.columns(3)
-            render_metric_card(c1, "Отмены", total_row['% Отмен'].values[0], TARGETS['cancels'])
-            render_metric_card(c2, "Вронги", total_row['% Неверных'].values[0], TARGETS['wrongs'])
-            render_metric_card(c3, "БФ (Брак)", total_row['% БФ'].values[0], TARGETS['bf'])
-        else:
-            st.warning("Строка 'Итого' не найдена.")
+        df_points['% Отмен'] = safe_divide(df_points['Партн. отмены'], df_points['Заказы с ID'])
+        df_points['% Неверных'] = safe_divide(df_points['Неверные'], df_points['Заказы с ID'])
+        df_points['% БФ'] = safe_divide(df_points['Бэдфуд'], df_points['Заказы с ID'])
 
         st.divider()
-
-        # ============================================================
-        # 3. ТАРГЕТЫ ПО КАЖДОЙ ТОЧКЕ
-        # ============================================================
-        st.subheader("📍 Детализация по точкам (без строки 'Итого')")
-        
-        df_points = df_branches[~df_branches['Филиал'].str.contains('Итого', case=False, na=False)].copy()
+        st.subheader("📍 Детализация по точкам")
         
         if not df_points.empty:
-            cols = st.columns(len(df_points))
+            for i in range(0, len(df_points), 3):
+                cols = st.columns(3)
+                chunk = df_points.iloc[i:i+3]
+                for idx, (index, row) in enumerate(chunk.iterrows()):
+                    with cols[idx]:
+                        st.markdown(f"#### {row['Филиал']}")
+                        render_metric_card(st, "Отмены", row['% Отмен'], TARGETS['cancels'])
+                        st.write("") 
+                        render_metric_card(st, "Вронги", row['% Неверных'], TARGETS['wrongs'])
+                        st.write("")
+                        render_metric_card(st, "БФ (Брак)", row['% БФ'], TARGETS['bf'])
+                        st.write("---")
+
+            st.divider()
+            # ============================================================
+            # 2. ГРАФИК (Теперь защищен от пустых данных)
+            # ============================================================
+            st.subheader("📊 Визуальное сравнение")
+            fig = go.Figure()
+            fig.add_bar(name="Отмены, %", x=df_points['Филиал'], y=df_points['% Отмен'], marker_color='#D64545', text=df_points['% Отмен'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
+            fig.add_bar(name="Вронги, %", x=df_points['Филиал'], y=df_points['% Неверных'], marker_color='#E6A700', text=df_points['% Неверных'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
+            fig.add_bar(name="БФ, %", x=df_points['Филиал'], y=df_points['% БФ'], marker_color='#2E9E4F', text=df_points['% БФ'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
             
-            for idx, (index, row) in enumerate(df_points.iterrows()):
-                with cols[idx]:
-                    st.markdown(f"#### {row['Филиал']}")
-                    render_metric_card(st, "Отмены", row['% Отмен'], TARGETS['cancels'])
-                    st.write("") 
-                    render_metric_card(st, "Вронги", row['% Неверных'], TARGETS['wrongs'])
-                    st.write("")
-                    render_metric_card(st, "БФ (Брак)", row['% БФ'], TARGETS['bf'])
+            fig.add_hline(y=TARGETS['cancels'], line_dash="dash", line_color="#D64545", annotation_text=f"Цель отмен {TARGETS['cancels']}%", annotation_position="top left")
+            fig.add_hline(y=TARGETS['wrongs'], line_dash="dash", line_color="#E6A700", annotation_text=f"Цель вронгов {TARGETS['wrongs']}%", annotation_position="top left")
+            fig.add_hline(y=TARGETS['bf'], line_dash="dash", line_color="#2E9E4F", annotation_text=f"Цель БФ {TARGETS['bf']}%", annotation_position="bottom left")
+            
+            fig.update_layout(barmode='group', yaxis_title="%", margin=dict(t=40, b=40, l=40, r=40))
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Нет данных по отдельным филиалам.")
+            st.info("Нет данных по отдельным филиалам для отображения графиков.")
 
         st.divider()
 
         # ============================================================
-        # 4. ГРАФИК
-        # ============================================================
-        st.subheader("📊 Визуальное сравнение")
-        
-        fig = go.Figure()
-        fig.add_bar(name="Отмены, %", x=df_points['Филиал'], y=df_points['% Отмен'], marker_color='#D64545', text=df_points['% Отмен'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
-        fig.add_bar(name="Вронги, %", x=df_points['Филиал'], y=df_points['% Неверных'], marker_color='#E6A700', text=df_points['% Неверных'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
-        fig.add_bar(name="БФ, %", x=df_points['Филиал'], y=df_points['% БФ'], marker_color='#2E9E4F', text=df_points['% БФ'].apply(lambda x: f"{x:.2f}%"), textposition="outside")
-        
-        fig.add_hline(y=TARGETS['cancels'], line_dash="dash", line_color="#D64545", annotation_text=f"Цель отмен {TARGETS['cancels']}%", annotation_position="top left")
-        fig.add_hline(y=TARGETS['wrongs'], line_dash="dash", line_color="#E6A700", annotation_text=f"Цель вронгов {TARGETS['wrongs']}%", annotation_position="top left")
-        fig.add_hline(y=TARGETS['bf'], line_dash="dash", line_color="#2E9E4F", annotation_text=f"Цель БФ {TARGETS['bf']}%", annotation_position="bottom left")
-        
-        fig.update_layout(barmode='group', yaxis_title="%")
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.divider()
-
-        # ============================================================
-        # 5. ПРИЧИНЫ ПО ЧАСАМ
+        # 3. ПРИЧИНЫ ПО ДНЯМ И ЧАСАМ
         # ============================================================
         hour_header_idx = None
         for i, row in raw_df.iterrows():
@@ -144,36 +137,65 @@ try:
             df_hours = raw_df.iloc[hour_header_idx + 1:].copy()
             df_hours.columns = raw_df.iloc[hour_header_idx].values
             
-            cols_to_keep_h = ['Филиал', 'Час', 'Метрика', 'Причина', 'Случаев', 'Дат']
-            available_cols_h = [c for c in cols_to_keep_h if c in df_hours.columns]
-            df_hours = df_hours[available_cols_h].dropna(subset=['Час', 'Причина', 'Случаев'])
+            df_hours = df_hours.dropna(subset=['Час', 'Причина'])
             
-            df_hours['Случаев'] = pd.to_numeric(df_hours['Случаев'], errors='coerce').fillna(0)
-            df_hours['Дат'] = pd.to_numeric(df_hours['Дат'], errors='coerce').fillna(0)
+            if 'Случаев' in df_hours.columns:
+                df_hours['Случаев'] = pd.to_numeric(df_hours['Случаев'], errors='coerce').fillna(0)
+            else:
+                df_hours['Случаев'] = 0
 
+            if 'Дат' in df_hours.columns:
+                df_hours['Дат'] = df_hours['Дат'].astype(str).str.split(' ').str[0].str.replace('.0', '', regex=False)
+            else:
+                df_hours['Дат'] = "Без даты"
+
+            # Убрали жесткую проверку на ':' (чтобы не отсеять часы без двоеточия)
             df_hours_clean = df_hours[
                 (~df_hours['Час'].astype(str).str.contains('Все', case=False, na=False)) &
-                (~df_hours['Причина'].astype(str).str.contains('Все', case=False, na=False)) &
-                (df_hours['Час'].astype(str).str.contains(':', na=False))
+                (~df_hours['Причина'].astype(str).str.contains('Все', case=False, na=False))
             ]
 
             st.subheader("⏰ Когда и почему?")
             if not df_hours_clean.empty:
-                branches_in_hours = df_hours_clean['Филиал'].dropna().unique()
-                selected_branch = st.selectbox("Выберите точку:", branches_in_hours)
+                branches_in_hours = df_hours_clean['Филиал'].dropna().unique() if 'Филиал' in df_hours_clean.columns else []
                 
-                filtered_hours = df_hours_clean[df_hours_clean['Филиал'] == selected_branch]
-                
-                if not filtered_hours.empty:
-                    fig_reasons = px.bar(filtered_hours, x='Час', y='Случаев', color='Причина', 
-                                         title=f"Причины: {selected_branch}")
-                    st.plotly_chart(fig_reasons, use_container_width=True)
+                if len(branches_in_hours) > 0:
+                    selected_branch = st.selectbox("Выберите точку для анализа:", branches_in_hours)
+                    filtered_hours = df_hours_clean[df_hours_clean['Филиал'] == selected_branch].copy()
                     
-                    st.markdown("---")
-                    st.subheader("📋 Детальный список")
-                    display_df_h = filtered_hours[['Час', 'Метрика', 'Причина', 'Случаев', 'Дат']].copy()
-                    display_df_h.columns = ['Время', 'Тип', 'Причина', 'Кол-во', 'Дней']
-                    st.dataframe(display_df_h, hide_index=True, use_container_width=True)
+                    if not filtered_hours.empty:
+                        filtered_hours['День_Час'] = filtered_hours['Дат'] + " | " + filtered_hours['Час'].astype(str)
+
+                        # Применяем умную сортировку
+                        filtered_hours = smart_date_sort(filtered_hours, 'Дат', 'Час')
+
+                        fig_reasons = px.bar(
+                            filtered_hours, x='День_Час', y='Случаев', color='Причина', 
+                            title=f"Причины по дням и часам: {selected_branch}",
+                            labels={'День_Час': 'Дата | Время', 'Случаев': 'Кол-во'}
+                        )
+                        fig_reasons.update_layout(xaxis_tickangle=-45)
+                        st.plotly_chart(fig_reasons, use_container_width=True)
+                        
+                        st.markdown("---")
+                        st.subheader("📋 Детальный список")
+                        display_cols = [c for c in ['Дат', 'Час', 'Метрика', 'Причина', 'Случаев'] if c in filtered_hours.columns]
+                        display_df_h = filtered_hours[display_cols].copy()
+                        
+                        rename_map = {'Дат': 'Дата', 'Час': 'Время', 'Метрика': 'Тип', 'Причина': 'Причина', 'Случаев': 'Кол-во'}
+                        display_df_h = display_df_h.rename(columns=rename_map)
+                        st.dataframe(display_df_h, hide_index=True, use_container_width=True)
+                else:
+                    st.warning("В данных по причинам не найдена колонка 'Филиал'.")
+            else:
+                st.info("Нет детальных данных по причинам.")
+        else:
+            st.warning("В файле не найден блок с причинами.")
+            
+    else:
+        st.error("Не удалось найти шапку таблицы с филиалами (ожидались колонки 'Филиал' и 'Заказы с ID').")
 
 except Exception as e:
-    st.error(f"Ошибка при чтении файла: {e}. Убедитесь, что файл 'data.xlsx' загружен и не поврежден.")
+    # Теперь ошибка будет более информативной
+    st.error(f"Произошла ошибка: {type(e).__name__}.")
+    st.exception(e) # Выводит полный стек ошибки (помогает при отладке)
