@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 
 PARTNER_NAME = "Ди-2"
 FILE_PATH = "data.xlsx"
-TARGETS = {"cancels": 0.80, "wrongs": 0.60, "bf": 0.30}
+TARGETS = {"cancels": 0.50, "wrongs": 0.60, "bf": 0.30}
 DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 st.set_page_config(page_title=f"Пульт Качества ({PARTNER_NAME})", layout="wide")
